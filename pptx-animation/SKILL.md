@@ -1,109 +1,52 @@
 ---
 name: pptx-animation
-description: Use when a PowerPoint .pptx deck needs element-by-element animations, click-by-click reveal sequences, grouped column/card/flow animations, animation QA, or animation XML/API troubleshooting. Especially relevant when adding entrance animations to existing slide elements while preserving layout.
+description: Use when a PowerPoint .pptx deck needs click-by-click entrance animations, grouped column/card/flow reveals, semantic block animation, animation QA, or animation XML/API troubleshooting. Adds entrance animations to existing slide elements while preserving the static layout.
 ---
 
 # PPTX Animation
 
-## Overview
+Add click-by-click entrance (fade) animations to an existing `.pptx`, preserving the static slide. Run scripts from the skill root (`python3 scripts/…`).
 
-Use this skill to add and validate PowerPoint element animations in existing `.pptx` files. Prefer Microsoft PowerPoint's native automation API when available; use raw OOXML only as a fallback or for inspection.
+## Two methods — pick by environment
 
-## Recommended Workflow
+- **Method A — pure-file injection (default, recommended).** Writes PowerPoint's canonical `<p:timing>` XML straight into the deck via zip/lxml. Never opens PowerPoint, so it can't crash/hang the app, runs headless, scales to large decks.
+- **Method B — PowerPoint AppleScript API** (macOS, PowerPoint open). Only for small decks where you want PowerPoint to author the XML.
 
-1. Start from a copy of the deck, never the only formal file.
-2. Inspect candidate slides with `python-pptx` to list shape indices, names, positions, and text. Use `scripts/list_shapes.py` when a reusable inventory is helpful.
-3. Define click groups by presentation logic:
-   - Parallel columns/cards: one click per column/card, left-to-right and top-to-bottom.
-   - Flow diagrams: one click per process step, then metrics or validation evidence.
-   - Comparison pages: reveal baseline/problem first, then proposed method, then result.
-   - Section/title/thank-you pages: usually no animation, or only a subtle title fade.
-4. Prefer stable shape names in the spec. Numeric indices are acceptable for quick tests, but production decks should use unique PowerPoint shape names because AppleScript shape order can differ from `python-pptx` shape order.
-5. Add entrance effects:
-   - Use `animation type fade`.
-   - First element in each click group uses `trigger on page click`.
-   - Remaining elements in the same group use `trigger with previous`.
-   - Keep duration around `0.35` to `0.45` seconds.
-6. Validate:
-   - Use `scripts/count_effects.py` or query PowerPoint directly with `count effects of main sequence of timeline of slide N`.
-   - Run the deck QA script if one exists; animated slides should appear as `timing_slides`.
-   - Export/render PDF or thumbnails to confirm static final state is visually unchanged.
+Driving the AppleScript API per-slide is unreliable on large decks (hangs, AppleEvent timeouts, can crash the user's PowerPoint). And naively hand-written timing XML is rejected by PowerPoint (a "repaired" dialog drops the animations). Method A clones the exact structure PowerPoint emits, so it is accepted. Prefer Method A unless you specifically need PowerPoint in the loop.
 
-## Batch Script
+## Animate by SEMANTIC BLOCKS, not by element
 
-Use `scripts/add_click_animations.py` for deterministic batch work.
+One click reveals one whole visual unit — a complete card (box+title+body+image+chip+arrow together), a whole column, a row, a table, a panel-with-its-rows. Per-element reveals look broken. Order by reading logic: top lead/headline first → body blocks in natural flow (columns left→right, rows top→bottom, pipeline in process order, arrows with the block they point into) → result/banner punchline LAST. Cover, dividers, thank-you, and verbatim/embedded slides get NO animation.
 
-Input spec format:
+## Method A workflow
 
+```bash
+# 1. auto-cluster slides into semantic blocks -> spec.json; skip non-animated slides by 1-based index
+python3 scripts/cluster_blocks.py deck.pptx --out spec.json --skip 1,2,3,54 --map /tmp/bm
+# 2. VERIFY the block-map (below), hand-edit spec.json groups if needed
+# 3. inject canonical animation XML (no PowerPoint involved)
+python3 scripts/inject_animations.py deck.pptx deck_animated.pptx spec.json --duration 0.45
+# 4. render to PDF (soffice --headless --convert-to pdf; pdftoppm) to confirm file valid + static state intact
+```
+
+Spec: `slide` is the 1-based presentation index; each inner list is ONE click (members fade in together, first=`clickEffect`, rest=`withEffect`); members are shape ids for Method A.
 ```json
-{
-  "duration": 0.45,
-  "slides": [
-    {
-      "slide": 5,
-      "groups": [
-        ["Title 1", "Card A", "Card A caption"],
-        ["Card B", "Card B caption"]
-      ]
-    }
-  ]
-}
+{"duration":0.45,"slides":[{"slide":8,"groups":[[7,9,12],[20,21]]}]}
 ```
 
-Each group can contain PowerPoint shape names or PowerPoint shape indices. Prefer shape names for production decks. Use numeric indices only after checking them in PowerPoint, not only in `python-pptx`.
+**Verify without opening PowerPoint:** `cluster_blocks.py --map <dir>` writes `blockmap.json` (per-slide block boxes in reveal order). Render the deck to JPGs at 96 dpi and overlay each box with its reveal number — confirm grouping (whole cards/columns) and order (lead first, banner last, columns left→right) by eye. Keep tuning `--skip` / `spec.json` until correct.
 
-Example:
+## Method B workflow (AppleScript, small interactive decks)
 
 ```bash
-python ~/.codex/skills/pptx-animation/scripts/add_click_animations.py \
-  input.pptx output_animated.pptx spec.json --per-slide
+python3 scripts/list_shapes.py deck.pptx --slides 5 6 --output shapes.csv   # prefer UNIQUE shape names
+python3 scripts/add_click_animations.py deck.pptx out.pptx spec.json --per-slide
+python3 scripts/count_effects.py out.pptx --slides 5 6                       # confirm PowerPoint recognizes effects
 ```
+Group members are shape names (safer than indices — AppleScript shape order ≠ python-pptx order). `--per-slide` opens/saves/closes per slide to avoid stale timeline objects (slow, closes open decks). If it hangs/crashes across many slides, switch to Method A.
 
-`--per-slide` is slower, but is recommended for large decks because it opens, saves, and closes the deck once per slide. This avoids stale PowerPoint timeline/sequence objects during long AppleScript runs. It will close currently open PowerPoint presentations.
+## Always
+Work on a copy; keep the un-animated deck as the primary deliverable and ship the animated one alongside.
 
-To generate a shape inventory:
-
-```bash
-python ~/.codex/skills/pptx-animation/scripts/list_shapes.py \
-  input.pptx --slides 5 6 7 --output shape_inventory.csv
-```
-
-To count PowerPoint-recognized effects after insertion:
-
-```bash
-python ~/.codex/skills/pptx-animation/scripts/count_effects.py \
-  output_animated.pptx --slides 5 6 7
-```
-
-## AppleScript Pattern
-
-For one group:
-
-```applescript
-set seq to main sequence of timeline of s
-set e1 to add effect seq for shape 3 of s fx animation type fade trigger on page click
-set duration of timing of e1 to 0.45
-set e2 to add effect seq for shape 4 of s fx animation type fade trigger with previous
-set duration of timing of e2 to 0.45
-```
-
-This produces PowerPoint-recognized `<p:timing>` and `<p:animEffect>` entries. It is safer than hand-writing timing XML for broad deck edits.
-
-## Troubleshooting Notes
-
-- If AppleScript reports that `main sequence ... doesn't understand add effect`, first verify the shape reference. In practice this can mean the shape index/name is wrong, not that animation insertion is unsupported.
-- If a script works on one slide but fails or hangs across many slides, rerun with `--per-slide`.
-- If a slide has grouped or embedded artwork, animate the outer meaningful object unless the internal shapes are independently named and visually useful.
-- After adding animations, export a PDF or contact sheet. PowerPoint animations should not change the static final slide state.
-
-## Fallback OOXML Notes
-
-PowerPoint animations live under `ppt/slides/slideN.xml` in `<p:timing>`. A fade entrance typically includes:
-
-- `<p:seq ... nodeType="mainSeq">`
-- click-triggered child nodes
-- `<p:set>` for `style.visibility`
-- `<p:animEffect transition="in" filter="fade">`
-- target elements such as `<p:spTgt spid="..."/>`
-
-Use OOXML fallback only when PowerPoint automation is unavailable, and always open the result in PowerPoint afterward.
+## Canonical XML, structure details, and gotchas
+See `references/ooxml_timing.md` — the exact `<p:timing>` skeleton, the two nesting details that cause a "repaired" dialog if wrong, the `python-pptx` slide-renumbering trap, and the validity-vs-playback QA notes.
